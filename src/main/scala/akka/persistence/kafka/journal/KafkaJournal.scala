@@ -1,25 +1,30 @@
 package akka.persistence.kafka.journal
 
-import scala.collection.immutable.Seq
 
-import akka.persistence.{PersistentId, PersistentConfirmation}
-import akka.persistence.journal.AsyncWriteJournal
-import akka.serialization.{Serialization, SerializationExtension}
-
-import kafka.producer._
-
-import scala.concurrent.Future
-import scala.concurrent.duration._
 
 import akka.actor._
 import akka.pattern.ask
-import akka.persistence.PersistentRepr
+import akka.util.Timeout
+import scala.util.Try
+
+
+import akka.persistence.journal.AsyncWriteJournal
+import akka.persistence.{AtomicWrite, PersistentRepr}
 import akka.persistence.kafka._
 import akka.persistence.kafka.MetadataConsumer.Broker
 import akka.persistence.kafka.BrokerWatcher.BrokersUpdated
-import akka.util.Timeout
+
+import akka.serialization.{Serialization, SerializationExtension}
+
+import scala.collection.immutable.Seq
+import scala.concurrent.Future
+import scala.concurrent.duration._
+
+import kafka.producer._
+
 
 class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
+
   import context.dispatcher
 
   type Deletions = Map[String, (Long, Boolean)]
@@ -35,7 +40,7 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
     super.postStop()
   }
 
-  override def receive: Receive = localReceive.orElse(super.receive)
+  override def receivePluginInternal: Receive = localReceive.orElse(super.receivePluginInternal)
 
   private def localReceive: Receive = {
     case BrokersUpdated(newBrokers) if newBrokers != brokers =>
@@ -58,30 +63,21 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
   // Transient deletions only to pass TCK (persistent not supported)
   var deletions: Deletions = Map.empty
 
-  def asyncWriteMessages(messages: Seq[PersistentRepr]): Future[Unit] = {
-    val sends = messages.groupBy(_.persistenceId).map {
-      case (pid, msgs) => writerFor(pid).ask(msgs)(writeTimeout)
-    }
-    Future.sequence(sends).map(_ => ())
+  def asyncWriteMessages(messages: Seq[AtomicWrite]): Future[Seq[Try[Unit]]] = {
+    val writes: Seq[Future[Try[Unit]]] = messages.map(
+      aw => writerFor(aw.persistenceId).ask(aw.payload)(writeTimeout).mapTo[Try[Unit]]
+    )
+    Future.sequence(writes)
   }
 
-  def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long, permanent: Boolean): Future[Unit] =
-    Future.successful(deleteMessagesTo(persistenceId, toSequenceNr, permanent))
+  def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] =
+    Future.successful(deleteMessagesTo(persistenceId, toSequenceNr, false))
 
-  def asyncDeleteMessages(messageIds: Seq[PersistentId], permanent: Boolean): Future[Unit] =
+  def asyncDeleteMessages(persistenceId: String, toSequenceNr: Long): Future[Unit] =
     Future.failed(new UnsupportedOperationException("Individual deletions not supported"))
-
-  def asyncWriteConfirmations(confirmations: Seq[PersistentConfirmation]): Future[Unit] =
-    Future.failed(new UnsupportedOperationException("Channels not supported"))
 
   def deleteMessagesTo(persistenceId: String, toSequenceNr: Long, permanent: Boolean): Unit =
     deletions = deletions + (persistenceId -> (toSequenceNr, permanent))
-
-  def deleteMessages(messageIds: Seq[PersistentId], permanent: Boolean): Unit =
-    throw new UnsupportedOperationException("Individual deletions not supported")
-
-  def writeConfirmations(confirmations: Seq[PersistentConfirmation]): Unit =
-    throw new UnsupportedOperationException("Channels not supported")
 
   private def writerFor(persistenceId: String): ActorRef =
     writers(math.abs(persistenceId.hashCode) % config.writeConcurrency)

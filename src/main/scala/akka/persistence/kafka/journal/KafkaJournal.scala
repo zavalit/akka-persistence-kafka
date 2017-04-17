@@ -79,8 +79,10 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
     Future.sequence(writes)
   }
 
-  def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] =
+  def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] = {
     Future.successful(deleteMessagesTo(persistenceId, toSequenceNr, false))
+  }
+
 
   def deleteMessagesTo(persistenceId: String, toSequenceNr: Long, permanent: Boolean): Unit =
     deletions = deletions + (persistenceId -> (toSequenceNr, permanent))
@@ -113,8 +115,13 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
   }
 
   def asyncReplayMessages(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long, max: Long)(replayCallback: PersistentRepr => Unit): Future[Unit] = {
+    println(s"asyncReplayMessages ${persistenceId} ${fromSequenceNr} ${toSequenceNr} replayCallback ${replayCallback}")
+
     val deletions = this.deletions
-    Future(replayMessages(persistenceId, fromSequenceNr, toSequenceNr, max, deletions, replayCallback))
+    if (fromSequenceNr == 0)
+      Future(replayMessages(persistenceId, 1L, toSequenceNr, max, deletions, replayCallback))
+    else
+      Future(replayMessages(persistenceId, fromSequenceNr, toSequenceNr, max, deletions, replayCallback))
   }
 
   def replayMessages(persistenceId: String, fromSequenceNr: Long, toSequenceNr: Long, max: Long, deletions: Deletions, callback: PersistentRepr => Unit): Unit = {

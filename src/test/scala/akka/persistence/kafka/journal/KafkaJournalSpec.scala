@@ -27,4 +27,6 @@ class KafkaJournalSpec extends JournalSpec (
   }
 
   override def supportsRejectingNonSerializableObjects = false
+
+  
 }

@@ -13,6 +13,7 @@ import akka.persistence.{AtomicWrite, PersistentRepr}
 import akka.persistence.kafka._
 import akka.persistence.kafka.MetadataConsumer.Broker
 import akka.persistence.kafka.BrokerWatcher.BrokersUpdated
+import akka.persistence.kafka.journal.KafkaJournalProtocol._
 
 import akka.serialization.{Serialization, SerializationExtension}
 
@@ -42,12 +43,20 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
 
   override def receivePluginInternal: Receive = localReceive.orElse(super.receivePluginInternal)
 
+
   private def localReceive: Receive = {
     case BrokersUpdated(newBrokers) if newBrokers != brokers =>
       brokers = newBrokers
       journalProducerConfig = config.journalProducerConfig(brokers)
       eventProducerConfig = config.eventProducerConfig(brokers)
       writers.foreach(_ ! UpdateKafkaJournalWriterConfig(writerConfig))
+    case ReadHighestSequenceNr(fromSequenceNr, persistenceId, persistentActor) =>
+      try {
+        val highest = readHighestSequenceNr(persistenceId, fromSequenceNr)
+        sender ! ReadHighestSequenceNrSuccess(highest)
+      } catch {
+        case e: Exception => sender ! ReadHighestSequenceNrFailure(e)
+      }
   }
 
   // --------------------------------------------------------------------------------------
@@ -72,9 +81,6 @@ class KafkaJournal extends AsyncWriteJournal with MetadataConsumer {
 
   def asyncDeleteMessagesTo(persistenceId: String, toSequenceNr: Long): Future[Unit] =
     Future.successful(deleteMessagesTo(persistenceId, toSequenceNr, false))
-
-  def asyncDeleteMessages(persistenceId: String, toSequenceNr: Long): Future[Unit] =
-    Future.failed(new UnsupportedOperationException("Individual deletions not supported"))
 
   def deleteMessagesTo(persistenceId: String, toSequenceNr: Long, permanent: Boolean): Unit =
     deletions = deletions + (persistenceId -> (toSequenceNr, permanent))
@@ -156,24 +162,27 @@ private class KafkaJournalWriter(var config: KafkaJournalWriterConfig) extends A
       evtProducer = createEventProducer()
 
     case messages: Seq[PersistentRepr] =>
-      writeMessages(messages)
-      sender ! ()
+      val result = writeMessages(messages)
+      sender ! result
   }
 
-  def writeMessages(messages: Seq[PersistentRepr]): Unit = {
-    val keyedMsgs = for {
-      m <- messages
-    } yield new KeyedMessage[String, Array[Byte]](journalTopic(m.persistenceId), "static", config.serialization.serialize(m).get)
+  def writeMessages(messages: Seq[PersistentRepr]): Try[Unit] = {
+    Try {
+        val keyedMsgs = for {
+          m <- messages
+        } yield new KeyedMessage[String, Array[Byte]](journalTopic(m.persistenceId), "static", config.serialization.serialize(m).get)
 
-    val keyedEvents = for {
-      m <- messages
-      e = Event(m.persistenceId, m.sequenceNr, m.payload)
-      t <- config.evtTopicMapper.topicsFor(e)
-    } yield new KeyedMessage(t, e.persistenceId, config.serialization.serialize(e).get)
+        val keyedEvents = for {
+          m <- messages
+          e = Event(m.persistenceId, m.sequenceNr, m.payload)
+          t <- config.evtTopicMapper.topicsFor(e)
+        } yield new KeyedMessage(t, e.persistenceId, config.serialization.serialize(e).get)
 
-    msgProducer.send(keyedMsgs: _*)
-    evtProducer.send(keyedEvents: _*)
-  }
+        msgProducer.send(keyedMsgs: _*)
+        evtProducer.send(keyedEvents: _*)
+      }
+    }
+
 
   override def postStop(): Unit = {
     msgProducer.close()
